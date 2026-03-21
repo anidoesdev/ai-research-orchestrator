@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: research_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    environment:
+        POSTGRES_USER: admin
+        POSTGRES_PASSWORD: postpass
+        POSTGRES_DB: research_memory
+  redis:
+    image: redis:alpine
+    container_name: research_cache
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+volumes:
+    pgdata:  
+   
