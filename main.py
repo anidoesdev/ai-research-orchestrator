@@ -5,10 +5,10 @@ import asyncpg
 import redis.asyncio as redis
 import asyncio
 from fastapi.middleware.cors import CORSMiddleware 
-import os 
-from dotenv import load_dotenv
-# from groq import AsyncGroq
 from model import llm
+import urllib.request
+import xml.etree.ElementTree as ET
+import httpx
 
 # load_dotenv()
 # groq_client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
@@ -17,9 +17,10 @@ model = SentenceTransformer("all-MiniLM-L6-v2")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global task_queue, result_queue, db_pool
+    global task_queue, result_queue, ingest_queue, db_pool
     task_queue = asyncio.Queue()
     result_queue = asyncio.Queue()
+    ingest_queue = asyncio.Queue()
     db_pool = None
 
     try:
@@ -67,6 +68,7 @@ async def lifespan(app: FastAPI):
         if await client.ping():
                 print("Connected to Redis")
         asyncio.create_task(research_worker())
+        asyncio.create_task(ingestion_worker())
         yield
         await db_pool.close()
         
@@ -119,6 +121,43 @@ async def research_worker():
             print(f"worker error: {e}")
         finally:
             task_queue.task_done()
+
+async def ingestion_worker():
+    while True:
+        try:
+            topic = await ingest_queue.get()
+            formatted_topic = topic.replace(" ","+")
+            url = f"http://export.arxiv.org/api/query?search_query=all:{formatted_topic}&start=0&max_results=3"
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url=url,follow_redirects=True)
+            
+            root = ET.fromstring(response.text)
+            ns = '{http://www.w3.org/2005/Atom}'
+            print(root)
+            for data in root.findall(f'{ns}entry'):
+                title = data.find(f'{ns}title').text
+                summary = data.find(f'{ns}summary').text
+                summary_vectors = model.encode(summary).tolist()
+                print(f"Found paper: {title}")
+                async with db_pool.acquire() as conn:
+                    await conn.execute(
+                        '''
+                        insert into research_papers (title,content,embedding) values ($1,$2,$3)                    
+                        ''',
+                        title,summary,str(summary_vectors)
+                        
+                    )
+        except Exception as e:
+            print({f"Ingestion error: {e}"})
+        finally:
+            ingest_queue.task_done()
+
+@app.get("/fetch-papers")
+async def fetch_papers(topic:str):
+    await ingest_queue.put(topic)
+    return {"status":"Ingestionn started in the background."}
+
+
         
 @app.get("/trigger-research")
 async def trigger_research(query:str):
@@ -158,6 +197,7 @@ async def search_research(query:str,request:Request):
             str(query_vector)
         )
     return {"title":record['title'],"content":record['content']}
+
 
 
     

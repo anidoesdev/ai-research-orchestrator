@@ -8,6 +8,8 @@ interface Message {
 function App() {
   const [userQuery,setUserQuery] = useState("");
   const [history,setHistory] = useState<Message[]>([]);
+  const [topicQuery,setTopicQuery] = useState("");
+  const [isIngesting,setIsIngesting] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -27,6 +29,18 @@ function App() {
       console.log("this is the error: " ,err);
     }
   }
+  async function handleFetch(e: React.FormEvent){
+    e.preventDefault()
+    setIsIngesting(true);
+    try{
+      await fetch(`http://127.0.0.1:8000/fetch-papers?topic=${topicQuery}`)
+      setIsIngesting(false);
+      setTopicQuery("")
+
+    }catch (err){
+      console.log("Here is the error in reasearch topic: ",err)
+    }
+  }
   
   return (
     <div className='chat-container'>
@@ -38,6 +52,11 @@ function App() {
           </div>
         ))}
       </div>
+      <form onSubmit={handleFetch}>
+        <label>What topic you wanna research about?</label>
+        <input type='text' value={topicQuery} onChange={(e)=>setTopicQuery(e.target.value)}></input>
+        <button disabled={isIngesting}>{isIngesting ? "Downloading Papers..." : "Fetched Papers"}</button>
+      </form>
       <form onSubmit={handleSubmit}>
         <label>enter your query</label>
         <input type='text' value={userQuery} onChange={(e)=>setUserQuery(e.target.value)}></input>
