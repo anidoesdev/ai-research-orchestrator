@@ -12,8 +12,7 @@ function App() {
   const [history, setHistory] = useState<Message[]>([]);
   const [topicQuery, setTopicQuery] = useState("");
   const [isIngesting, setIsIngesting] = useState(false);
-  const [isThinking, setIsThinking] = useState(false);
-  
+  const [isThinking, setIsThinking] = useState(false);  
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   
@@ -36,11 +35,19 @@ function App() {
     setUserQuery("");
     
     setHistory(prev => [...prev, { role: "user", text: queryText }]);
+    const currentHistory = [...history,{role: "user", text: queryText}];
+    
     setIsThinking(true);
     setHistory(prev => [...prev, { role: "agent", text: "" }]);
 
     try {
-      const response = await fetch(`http://127.0.0.1:8000/trigger-research?query=${queryText}`);
+      const response = await fetch(`http://127.0.0.1:8000/trigger-research`,{
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({history: currentHistory})
+      });
       if (!response.body) throw new Error("No response body");
       
       const reader = response.body.getReader();
