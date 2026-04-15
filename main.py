@@ -26,10 +26,10 @@ model = SentenceTransformer("all-MiniLM-L6-v2")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global task_queue, result_queue, ingest_queue, db_pool
+    global db_pool, redis_client
     # task_queue = asyncio.Queue()
     # result_queue = asyncio.Queue()
-    ingest_queue = asyncio.Queue()
+    # ingest_queue = asyncio.Queue()
     db_pool = None
 
     try:
@@ -73,8 +73,8 @@ async def lifespan(app: FastAPI):
         # '''
         # )
         
-        client = redis.from_url("redis://localhost:6379")
-        if await client.ping():
+        redis_client = redis.from_url("redis://localhost:6379")
+        if await redis_client.ping():
                 print("Connected to Redis")
         # asyncio.create_task(research_worker())
         asyncio.create_task(ingestion_worker())
@@ -139,7 +139,8 @@ async def ingestion_worker():
     )
     while True:
         try:
-            topic = await ingest_queue.get()
+            queue_name, task_data = await redis_client.brpop("ingestion_tasks")
+            topic = task_data.decode("utf-8")
             print(f"This is the topic: {topic}")
             search = arxiv.Search(
                 query=f"all:{topic}",
@@ -172,12 +173,13 @@ async def ingestion_worker():
         except Exception as e:
             print(f"API error: {str(e)}")
         finally:
-            ingest_queue.task_done()
+            # ingest_queue.task_done()
+            print(f"task completed")
 
 @app.get("/fetch-papers")
 async def fetch_papers(topic:str):
-    await ingest_queue.put(topic)
-    return {"status":"Ingestionn started in the background."}
+    await redis_client.lpush("ingestion_tasks",topic)
+    return {"status":"Ingestionn started via Redis queue"}
 
 
         
