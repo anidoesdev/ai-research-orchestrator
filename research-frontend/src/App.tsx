@@ -52,8 +52,6 @@ function App() {
       
       const reader = response.body.getReader();
       const decoder = new TextDecoder("utf-8");
-      
-      setIsThinking(false); 
 
       while (true) {
         const { done, value } = await reader.read();
@@ -71,6 +69,7 @@ function App() {
           return newHistory;
         });
       }
+      setIsThinking(false);
     } catch (err) {
       console.log("Chat error: ", err);
       setIsThinking(false);
@@ -123,13 +122,13 @@ function App() {
                   placeholder="e.g. Graph Networks"
                   value={topicQuery} 
                   onChange={(e) => setTopicQuery(e.target.value)}
-                  className="bg-zinc-900/50 border border-white/5 rounded-lg px-4 py-3 text-sm text-zinc-200 focus:border-white/20 focus:bg-zinc-900 transition-all outline-none placeholder:text-zinc-600"
+                  className="bg-zinc-900/50 border border-white/5 rounded-lg px-4 py-3 text-sm text-zinc-200 focus:border-white/20 focus:bg-zinc-900 focus:ring-2 focus:ring-emerald-500/20 transition-all outline-none placeholder:text-zinc-600"
                 />
               </div>
               <button 
                 type="submit" 
                 disabled={!topicQuery.trim()}
-                className="px-4 py-3 rounded-lg font-medium text-sm transition-all duration-300 bg-zinc-100 hover:bg-white text-zinc-950 shadow-[0_0_15px_rgba(255,255,255,0.05)] disabled:opacity-50 disabled:cursor-not-allowed"
+                className="px-4 py-3 rounded-lg font-medium text-sm transition-all duration-300 bg-zinc-100 hover:bg-white text-zinc-950 shadow-[0_0_15px_rgba(255,255,255,0.05)] disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
               >
                 Initialize Context
               </button>
@@ -164,8 +163,8 @@ function App() {
               <div key={index} className={`flex w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div className={`max-w-[85%] md:max-w-[75%] px-6 py-5 text-[0.95rem] font-light leading-relaxed transition-all ${
                   msg.role === 'user' 
-                    ? 'bg-zinc-800 text-zinc-100 rounded-3xl rounded-tr-sm shadow-sm' 
-                    : 'bg-transparent text-zinc-300'
+                    ? 'bg-zinc-800/80 text-zinc-50 rounded-3xl rounded-tr-md shadow-sm ring-1 ring-white/5' 
+                    : 'bg-zinc-900/40 text-zinc-200 rounded-3xl rounded-tl-md ring-1 ring-white/5'
                 }`}>
                   {msg.role === 'agent' && (
                     <div className="flex items-center gap-2 mb-3">
@@ -177,8 +176,27 @@ function App() {
                   )}
                   
                   {/* Markdown Container with Strict Typography */}
-                  <div className={`prose prose-invert max-w-none prose-p:leading-7 prose-pre:bg-zinc-900/80 prose-pre:border prose-pre:border-white/5 ${msg.role === 'user' ? 'text-zinc-100' : 'text-zinc-300'}`}>
-                     <ReactMarkdown>{msg.text}</ReactMarkdown>
+                  <div className={`prose prose-invert max-w-none prose-p:leading-7 prose-pre:bg-zinc-900/80 prose-pre:border prose-pre:border-white/5 prose-pre:rounded-xl prose-pre:p-4 prose-pre:overflow-x-auto prose-code:rounded-md prose-code:bg-zinc-900/60 prose-code:px-2 prose-code:py-0.5 prose-a:text-emerald-300 prose-a:underline prose-strong:text-zinc-100 prose-hr:border-white/10 ${msg.role === 'user' ? 'text-zinc-100' : 'text-zinc-300'}`}>
+                     <ReactMarkdown
+                       components={{
+                        a: ({ node, ...props }: { node?: unknown } & React.ComponentPropsWithoutRef<'a'>) => {
+                           void node;
+                           return (
+                             <a
+                               {...props}
+                               target="_blank"
+                               rel="noreferrer"
+                               className={
+                                 props.className ??
+                                 "underline decoration-emerald-400/40 underline-offset-4 hover:decoration-emerald-300"
+                               }
+                             />
+                           );
+                         },
+                       }}
+                     >
+                       {msg.text}
+                     </ReactMarkdown>
                   </div>
                 </div>
               </div>
@@ -211,12 +229,12 @@ function App() {
               value={userQuery} 
               onChange={(e) => setUserQuery(e.target.value)}
               disabled={isThinking}
-              className="w-full bg-zinc-900/90 backdrop-blur-md border border-white/10 rounded-2xl pl-6 pr-24 py-4 text-sm text-zinc-200 focus:border-white/20 focus:bg-zinc-900 outline-none transition-all disabled:opacity-50 shadow-2xl"
+              className="w-full bg-zinc-900/90 backdrop-blur-md border border-white/10 rounded-2xl pl-6 pr-24 py-4 text-sm text-zinc-200 focus:border-white/20 focus:bg-zinc-900 focus:ring-2 focus:ring-emerald-500/25 outline-none transition-all disabled:opacity-50 shadow-2xl"
             />
             <button 
               type="submit" 
               disabled={isThinking || !userQuery.trim()}
-              className="absolute right-2 px-5 py-2 rounded-xl bg-zinc-100 hover:bg-white text-zinc-950 text-sm font-medium transition-all disabled:bg-zinc-800 disabled:text-zinc-600 disabled:cursor-not-allowed shadow-sm"
+              className="absolute right-2 px-5 py-2 rounded-xl bg-zinc-100 hover:bg-white text-zinc-950 text-sm font-medium transition-all disabled:bg-zinc-800 disabled:text-zinc-600 disabled:cursor-not-allowed shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
             >
               Send
             </button>
