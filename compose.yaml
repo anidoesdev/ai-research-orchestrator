@@ -8,9 +8,9 @@ services:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
     environment:
-        POSTGRES_USER: admin
-        POSTGRES_PASSWORD: postpass
-        POSTGRES_DB: research_memory
+        POSTGRES_USER: ${PG_USER:-admin}
+        POSTGRES_PASSWORD: ${PG_PASSWORD:-postpass}
+        POSTGRES_DB: ${PG_DB:-research_memory}
   redis:
     image: redis:alpine
     container_name: research_cache

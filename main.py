@@ -1,6 +1,8 @@
-from fastapi import FastAPI,Request
+import os
+from contextlib import asynccontextmanager, suppress
+
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
-from contextlib import asynccontextmanager
 from sentence_transformers import SentenceTransformer
 import asyncpg
 import redis.asyncio as redis
@@ -10,7 +12,7 @@ from model import llm
 import arxiv
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 class Message(BaseModel):
     role: str
@@ -19,71 +21,74 @@ class Message(BaseModel):
 class ChatRequest(BaseModel):
     history: List[Message]
 
-# load_dotenv()
-# groq_client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
+DB_USER = os.getenv("PG_USER", "admin")
+DB_PASSWORD = os.getenv("PG_PASSWORD", "postpass")
+DB_NAME = os.getenv("PG_DB", "research_memory")
+DB_HOST = os.getenv("PG_HOST", "127.0.0.1")
+DB_PORT = int(os.getenv("PG_PORT", "5432"))
 
-model = SentenceTransformer("all-MiniLM-L6-v2")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+SENTENCE_TRANSFORMER_MODEL = os.getenv("SENTENCE_TRANSFORMER_MODEL", "all-MiniLM-L6-v2")
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "384"))
+
+model = SentenceTransformer(SENTENCE_TRANSFORMER_MODEL)
+
+
+async def embed_text(text: str) -> List[float]:
+    # SentenceTransformer encoding is CPU/GPU bound; keep the event loop responsive.
+    vec = await asyncio.to_thread(model.encode, text)
+    return vec.tolist()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global db_pool, redis_client
-    # task_queue = asyncio.Queue()
-    # result_queue = asyncio.Queue()
-    # ingest_queue = asyncio.Queue()
-    db_pool = None
+    ingestion_task: Optional[asyncio.Task] = None
+
+    app.state.db_pool = None
+    app.state.redis_client = None
 
     try:
-        db_pool = await asyncpg.create_pool(user="admin",password="postpass",database="research_memory",host="127.0.0.1",port=5432)
-        # connected_postgres = await asyncpg.connect(user="admin",password="postpass",database="research_memory",host="127.0.0.1",port=5432)
+        app.state.db_pool = await asyncpg.create_pool(
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME,
+            host=DB_HOST,
+            port=DB_PORT,
+        )
         print("database connection pool created")
-        async with db_pool.acquire() as conn:
+
+        async with app.state.db_pool.acquire() as conn:
             await conn.execute('CREATE EXTENSION IF NOT EXISTS vector')
-            await conn.execute('DROP TABLE IF EXISTS research_papers')
             await conn.execute('''
-                    CREATE TABLE research_papers(
-                        id SERIAL PRIMARY KEY,
-                        title TEXT,
-                        content TEXT,
-                        embedding vector(384)
-                    )
-                               ''')
+                CREATE TABLE IF NOT EXISTS research_papers(
+                    id SERIAL PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    embedding vector(%d)
+                )
+                ''' % EMBEDDING_DIM
+            )
             print("Vector table initialized")
-            # print("Ingecting knowledge into memory banks")
-            # papers = [
-            #     ("Quantum Topology", "Topological qubits utilize non-Abelian anyons to achieve fault-tolerant quantum computation."),
-            #     ("AI Transformers", "Transformer architectures rely on self-attention mechanisms to process sequential data in parallel, eliminating the need for recurrent loops."),
-            #     ("CRISPR Gene Editing", "Cas9 proteins use guide RNA to locate and cleave specific DNA sequences, allowing for highly targeted genetic modifications.")
-            # ]
-            # for title,content in papers:
-            #     vec = model.encode(content).tolist()
-            #     await conn.execute(
-            #         "insert into research_papers (title, content, embedding) values ($1, $2, $3)",
-            #         title, content, str(vec)
-            #     )
-            # print("Memory banks fully populated.")
-        # await connected_postgres.execute('CREATE EXTENSION IF NOT EXISTS vector')
-        # await connected_postgres.execute('DROP TABLE IF EXISTS research_papers')
-        # await connected_postgres.execute('''
-        #     CREATE TABLE IF NOT EXISTS research_papers(
-        #         id SERIAL PRIMARY KEY,
-        #         title TEXT,
-        #         content TEXT,
-        #         embedding vector(384)
-        #     )
-        # '''
-        # )
-        
-        redis_client = redis.from_url("redis://localhost:6379")
-        if await redis_client.ping():
-                print("Connected to Redis")
-        # asyncio.create_task(research_worker())
-        asyncio.create_task(ingestion_worker())
+
+        app.state.redis_client = redis.from_url(REDIS_URL)
+        if await app.state.redis_client.ping():
+            print("Connected to Redis")
+
+        ingestion_task = asyncio.create_task(ingestion_worker(app))
         yield
-        await db_pool.close()
         
-    except Exception as e:
-        print(f"this is the error: {e}")
-        yield
+        # Shutdown
+    finally:
+        if ingestion_task:
+            ingestion_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await ingestion_task
+
+        if app.state.redis_client:
+            with suppress(Exception):
+                await app.state.redis_client.close()
+
+        if app.state.db_pool:
+            await app.state.db_pool.close()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -131,16 +136,29 @@ app.add_middleware(
 #         finally:
 #             task_queue.task_done()
 
-async def ingestion_worker():
+async def ingestion_worker(app: FastAPI):
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size = 1000,
         chunk_overlap = 200,
         length_function = len,
     )
+    db_pool = app.state.db_pool
+    redis_client = app.state.redis_client
+    if not db_pool or not redis_client:
+        raise RuntimeError("DB pool or Redis client not initialized")
+
+    backoff_s = 1
     while True:
         try:
-            queue_name, task_data = await redis_client.brpop("ingestion_tasks")
-            topic = task_data.decode("utf-8")
+            # brpop returns None on timeout; keep looping without error spam.
+            result = await redis_client.brpop("ingestion_tasks", timeout=5)
+            if result is None:
+                continue
+
+            _, task_data = result
+            topic = task_data.decode("utf-8").strip()
+            if not topic:
+                continue
             print(f"This is the topic: {topic}")
             search = arxiv.Search(
                 query=f"all:{topic}",
@@ -159,7 +177,7 @@ async def ingestion_worker():
                 print(f"Processing: {title[:40]}... (Split into {len(chunks)} chunks)")
                 
                 for chunk in chunks:
-                    chunk_vector = model.encode(chunk).tolist()
+                    chunk_vector = await embed_text(chunk)
                     
                     async with db_pool.acquire() as conn:
                         await conn.execute(
@@ -170,51 +188,100 @@ async def ingestion_worker():
                             
                         )
             print(f"Agent: Successfully saved  '{topic}' data to neural vault.")
+            backoff_s = 1
         except Exception as e:
-            print(f"API error: {str(e)}")
-        finally:
-            # ingest_queue.task_done()
-            print(f"task completed")
+            # Keep the worker alive even if one topic fails.
+            print(f"Ingestion worker error: {str(e)}")
+            await asyncio.sleep(backoff_s)
+            backoff_s = min(backoff_s * 2, 30)
 
 @app.get("/fetch-papers")
 async def fetch_papers(topic:str):
-    await redis_client.lpush("ingestion_tasks",topic)
-    return {"status":"Ingestionn started via Redis queue"}
+    redis_client = app.state.redis_client if hasattr(app, "state") else None
+    if not redis_client:
+        raise HTTPException(status_code=503, detail="Redis not initialized")
+
+    topic = topic.strip()
+    if not topic:
+        raise HTTPException(status_code=422, detail="topic is required")
+
+    await redis_client.lpush("ingestion_tasks", topic)
+    return {"status":"Ingestion started via Redis queue"}
 
 
         
 @app.post("/trigger-research")
 async def trigger_research(request: ChatRequest):
-    latest_user_message = request.history[-1].text
-    
-    query_vector = model.encode(latest_user_message).tolist()
-    
-    async with db_pool.acquire() as conn:
-        records = await conn.fetch(
-            '''select title, content from research_papers order by embedding <=> $1 limit 3''',
-            str(query_vector)
-        )
+    if not request.history:
+        raise HTTPException(status_code=422, detail="history is required")
+
+    latest_user_message = request.history[-1].text.strip()
+    if not latest_user_message:
+        raise HTTPException(status_code=422, detail="latest user message must not be empty")
+
+    db_pool = app.state.db_pool if hasattr(app, "state") else None
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="DB not initialized")
+
+    try:
+        query_vector = await embed_text(latest_user_message)
+
+        async with db_pool.acquire() as conn:
+            records = await conn.fetch(
+                '''select title, content from research_papers order by embedding <=> $1 limit 3''',
+                str(query_vector)
+            )
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to retrieve relevant research")
+
     if not records:
-        context_string = "No relevent research found in the Vault."
+        context_string = ""
+        sources_md = "_No relevant sources were found in the vault._"
     else:
-        context_string = "\n\n".join([f"Source: {r['title']}\nData: {r['content']}" for r in records])
+        sources_md = "\n\n".join(
+            [f"[{idx+1}] {r['title']}\n{r['content']}" for idx, r in enumerate(records)]
+        )
+        context_string = "\n\n".join(
+            [f"Source: {r['title']}\nData: {r['content']}" for r in records]
+        )
     
     formatted_history = []
     for msg in request.history[:-1]:
         formatted_history.append({"role":"user" if msg.role == "user" else "assistant", "content":msg.text})
     
     messages_for_llm = [
-        {"role": "system","content": "You are a precise AI research agent. Use markdown formatting. Answer based on the provided context and previous conversation history"},
+        {
+            "role": "system",
+            "content": (
+                "You are a precise AI research agent.\n"
+                "Use ONLY the provided Sources to answer.\n"
+                "When you use information, cite it inline using the source numbers like [1], [2], etc.\n"
+                "If the Sources do not contain enough information, say so explicitly and ask for a better query."
+            ),
+        },
     ]
     messages_for_llm.extend(formatted_history)
     messages_for_llm.append(
-        {"role":"user","content": f"Context: \n{context_string}\n\nUser Question: {latest_user_message}"}
+        {
+            "role": "user",
+            "content": (
+                f"User Question:\n{latest_user_message}\n\n"
+                f"Sources:\n{sources_md}\n\n"
+                "Answer in Markdown."
+            ),
+        }
     )
     async def generate_response():
-        async for chunk in llm.astream(messages_for_llm):
-            if chunk.content:
-                yield chunk.content
-    return StreamingResponse(generate_response(),media_type="text/plain")
+        try:
+            async for chunk in llm.astream(messages_for_llm):
+                if chunk.content:
+                    yield chunk.content
+        except Exception as e:
+            # StreamingResponse can't change HTTP status after headers are sent,
+            # but we can still stream a readable error marker.
+            yield f"\n\n[Error generating response: {str(e)}]"
+
+    return StreamingResponse(generate_response(), media_type="text/plain")
     # query_vector = model.encode(query).tolist()
     # async with db_pool.acquire() as conn:
     #     records = await conn.fetch(
@@ -271,12 +338,24 @@ async def trigger_research(request: ChatRequest):
 
 @app.get('/search-research')
 async def search_research(query:str,request:Request):
-    query_vector = model.encode(query).tolist()
-    async with db_pool.acquire() as conn:
-        record = await conn.fetchrow(
-            '''SELECT TITLE, CONTENT FROM research_papers ORDER BY embedding <=> $1 LIMIT 1''',
-            str(query_vector)
-        )
+    if not query or not query.strip():
+        raise HTTPException(status_code=422, detail="query is required")
+
+    db_pool = app.state.db_pool if hasattr(app, "state") else None
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="DB not initialized")
+
+    try:
+        query_vector = await embed_text(query.strip())
+        async with db_pool.acquire() as conn:
+            record = await conn.fetchrow(
+                '''SELECT TITLE, CONTENT FROM research_papers ORDER BY embedding <=> $1 LIMIT 1''',
+                str(query_vector)
+            )
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to search research")
+    if not record:
+        raise HTTPException(status_code=404, detail="No matching research found")
     return {"title":record['title'],"content":record['content']}
 
 
